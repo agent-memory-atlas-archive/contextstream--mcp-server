@@ -3677,6 +3677,8 @@ mod schema_tests {
                 assert!(values.contains(&"smart_search"));
                 assert!(values.contains(&"decision_trace"));
                 assert!(values.contains(&"restore_context"));
+                assert!(values.contains(&"resume_list"));
+                assert!(values.contains(&"resume"));
                 assert!(values.contains(&"capture_plan"));
                 assert!(values.contains(&"get_plan"));
                 assert!(values.contains(&"update_plan"));

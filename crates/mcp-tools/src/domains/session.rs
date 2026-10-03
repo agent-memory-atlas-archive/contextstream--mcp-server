@@ -2190,6 +2190,18 @@ fn context_pressure_notice(
     }
 }
 
+/// The model-visible text of a resume response. The API renders it within a
+/// token budget; when it sends none, say so instead of returning nothing.
+fn resume_text(result: &Value, empty: &str) -> String {
+    let data = result.get("data").unwrap_or(result);
+    data.get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(empty)
+        .to_string()
+}
+
 fn format_restore_context_block(result: &Value, include_empty: bool) -> Option<String> {
     let data = result.get("data").unwrap_or(result);
     let restored = data
@@ -16208,6 +16220,9 @@ pub struct SessionInput {
     pub project_id: Option<String>,
     pub target_project: Option<String>,
     pub session_id: Option<String>,
+    /// For `resume`: a session id, an unambiguous id prefix, or `latest`.
+    #[serde(default)]
+    pub resume_id: Option<String>,
     // Capture fields
     pub title: Option<String>,
     pub content: Option<String>,
@@ -17029,6 +17044,76 @@ impl ToolHandler for SessionTool {
                 tool.execute(serde_json::to_value(&restore_input).unwrap())
                     .await
             }
+            "resume_list" => {
+                let scope = resolve_read_scope(
+                    &self.client,
+                    self.session.as_ref(),
+                    input.workspace_id.as_deref(),
+                    input.project_id.as_deref(),
+                )
+                .await?;
+                let workspace_id = scope.workspace_id.ok_or_else(|| {
+                    Error::Validation(
+                        "workspace_id is required for resume_list. Call init first or pass workspace_id explicitly."
+                            .to_string(),
+                    )
+                })?;
+                let result = self
+                    .client
+                    .session_resume_list(mcp_client::SessionResumeListParams {
+                        workspace_id: Some(workspace_id),
+                        project_id: scope.project_id,
+                        scope: input.scope,
+                        limit: input.limit,
+                        // The caller's own session is not a candidate to resume.
+                        exclude_session_id: input.session_id,
+                    })
+                    .await?;
+                let mut text = resume_text(&result, "No recent sessions found.");
+                if let Some(note) = scope.note {
+                    text.push_str(&format!("\n\n{note}"));
+                }
+                Ok(ToolResult::with_structured(text, result))
+            }
+            "resume" => {
+                let scope = resolve_read_scope(
+                    &self.client,
+                    self.session.as_ref(),
+                    input.workspace_id.as_deref(),
+                    input.project_id.as_deref(),
+                )
+                .await?;
+                let workspace_id = scope.workspace_id.ok_or_else(|| {
+                    Error::Validation(
+                        "workspace_id is required for resume. Call init first or pass workspace_id explicitly."
+                            .to_string(),
+                    )
+                })?;
+                // No id means the most recent session that did real work.
+                let id = input
+                    .resume_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or("latest")
+                    .to_string();
+                let result = self
+                    .client
+                    .session_resume_get(mcp_client::SessionResumeGetParams {
+                        workspace_id: Some(workspace_id),
+                        project_id: scope.project_id,
+                        scope: input.scope,
+                        id,
+                        exclude_session_id: input.session_id,
+                        include_card: None,
+                    })
+                    .await?;
+                let mut text = resume_text(&result, "Nothing to resume for this scope.");
+                if let Some(note) = scope.note {
+                    text.push_str(&format!("\n\n{note}"));
+                }
+                Ok(ToolResult::with_structured(text, result))
+            }
             "capture_plan" => {
                 let title = input
                     .title
@@ -17217,6 +17302,8 @@ impl ToolHandler for SessionTool {
                     "list_recaps",
                     "trigger_recap",
                     "restore_context",
+                    "resume_list",
+                    "resume",
                     "capture_plan",
                     "get_plan",
                     "update_plan",
@@ -17230,6 +17317,11 @@ impl ToolHandler for SessionTool {
             .uuid("workspace_id", "Workspace ID", false)
             .uuid("project_id", "Project ID", false)
             .string("session_id", "Session ID for transcript/snapshot restore", false)
+            .string(
+                "resume_id",
+                "For resume: a session id or an unambiguous prefix of one (6+ characters) from resume_list, or \"latest\" (the default) for the newest session that did real work. session_id (your current session) is left out of resume_list and latest.",
+                false,
+            )
             .string(
                 "target_project",
                 "Target child project by folder name or project name (e.g. 'contextstream', 'mcp-server')",
@@ -17352,7 +17444,7 @@ impl ToolHandler for SessionTool {
             )
             .string(
                 "scope",
-                "Scope of a decision (capture with event_type=decision)",
+                "Scope of a decision (capture with event_type=decision). For resume_list and resume: project (default when a project is known) or workspace.",
                 false,
             )
             .number(

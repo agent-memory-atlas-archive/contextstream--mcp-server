@@ -11623,6 +11623,28 @@ impl ContextStreamClient {
         self.post("/session/restore", body).await
     }
 
+    /// List the caller's recent sessions as a short newest-first picker.
+    pub async fn session_resume_list(
+        &self,
+        params: SessionResumeListParams,
+    ) -> Result<serde_json::Value> {
+        let config = self.config.read().await;
+        let body = params.with_defaults(&config);
+        drop(config);
+        self.post("/session/resume/list", body).await
+    }
+
+    /// Load one resume card: a session id, an unambiguous id prefix, or `latest`.
+    pub async fn session_resume_get(
+        &self,
+        params: SessionResumeGetParams,
+    ) -> Result<serde_json::Value> {
+        let config = self.config.read().await;
+        let body = params.with_defaults(&config);
+        drop(config);
+        self.post("/session/resume/get", body).await
+    }
+
     // =========================================================================
     // Plans
     // =========================================================================
@@ -15041,7 +15063,7 @@ impl ContextStreamClient {
             serde_json::json!({"name":"search","category":"search","description":"Search indexed source code with keyword, semantic, pattern, refactor, and exhaustive modes.","key_parameters":["query","mode","project_id","workspace_id","include_content"],"example":"search(query=\"AuthService\", mode=\"refactor\", output_format=\"paths\")"}),
             serde_json::json!({"name":"answer","category":"ai","description":"Ask a natural-language question across authorized ContextStream knowledge with current-truth, evidence, freshness, and coverage metadata.","actions":["query","recent_changes"],"key_parameters":["action","question","workspace_ids","project_ids","visibility","timezone"],"example":"answer(action=\"recent_changes\", question=\"What changed recently?\")"}),
             serde_json::json!({"name":"instruct","category":"session","description":"Read and acknowledge session-scoped injected instructions.","actions":["get","ack"],"key_parameters":["action","session_id","ids"],"example":"instruct(action=\"get\", session_id=\"session-123\")"}),
-            serde_json::json!({"name":"session","category":"session","description":"Ground, capture, recall, and restore durable session context; manage lessons and plans; access Daily Recaps.","actions":["capture","retro_capture","capture_lesson","get_lessons","update_lesson","delete_lesson","recall","ground","set_account_mode","remember","user_context","summary","compress","delta","smart_search","decision_trace","restore_context","capture_plan","get_plan","update_plan","list_plans","list_recaps","trigger_recap","list_suggested_rules","suggested_rule_action","suggested_rules_stats"],"key_parameters":["action","workspace_id","project_id","session_id"],"example":"session(action=\"ground\", user_message=\"continue the refactor\")"}),
+            serde_json::json!({"name":"session","category":"session","description":"Ground, capture, recall, and restore durable session context; manage lessons and plans; access Daily Recaps.","actions":["capture","retro_capture","capture_lesson","get_lessons","update_lesson","delete_lesson","recall","ground","set_account_mode","remember","user_context","summary","compress","delta","smart_search","decision_trace","restore_context","resume_list","resume","capture_plan","get_plan","update_plan","list_plans","list_recaps","trigger_recap","list_suggested_rules","suggested_rule_action","suggested_rules_stats"],"key_parameters":["action","workspace_id","project_id","session_id"],"example":"session(action=\"ground\", user_message=\"continue the refactor\")"}),
             serde_json::json!({"name":"memory","category":"memory","description":"Manage durable nodes, events, tasks, todos, docs, diagrams, and transcripts.","key_parameters":["action","workspace_id","project_id"],"example":"memory(action=\"list_docs\", doc_type=\"runbook\")"}),
             serde_json::json!({"name":"graph","category":"graph","description":"Inspect dependencies, impact, code health, complexity, cycles, and unused code.","key_parameters":["action","project_id","target_type","target_id"],"example":"graph(action=\"circular_dependencies\", project_id=\"<uuid>\")"}),
             serde_json::json!({"name":"project","category":"project","description":"List, inspect, create, index, and manage projects.","key_parameters":["action","project_id","folder_path"],"example":"project(action=\"index_status\")"}),
@@ -17564,6 +17586,72 @@ impl SessionRestoreContextParams {
             "project_id": project_id,
             "trigger": self.trigger,
             "include_durable_context": self.include_durable_context,
+        }))
+    }
+}
+
+/// Session resume list parameters.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SessionResumeListParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Uuid>,
+    /// `project` or `workspace`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// The caller's own session, left out of the list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_session_id: Option<String>,
+}
+
+impl SessionResumeListParams {
+    fn with_defaults(self, config: &Config) -> serde_json::Value {
+        let (workspace_id, project_id) =
+            scope_ids_with_defaults(self.workspace_id, self.project_id, config);
+        strip_nulls(serde_json::json!({
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "scope": self.scope,
+            "limit": self.limit,
+            "exclude_session_id": self.exclude_session_id,
+        }))
+    }
+}
+
+/// Session resume get parameters.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SessionResumeGetParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Uuid>,
+    /// `project` or `workspace`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// A session id, an unambiguous id prefix, or `latest`.
+    pub id: String,
+    /// The caller's own session, never chosen by `latest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_session_id: Option<String>,
+    /// Also return the structured card, not just the token-bounded text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_card: Option<bool>,
+}
+
+impl SessionResumeGetParams {
+    fn with_defaults(self, config: &Config) -> serde_json::Value {
+        let (workspace_id, project_id) =
+            scope_ids_with_defaults(self.workspace_id, self.project_id, config);
+        strip_nulls(serde_json::json!({
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "scope": self.scope,
+            "id": self.id,
+            "exclude_session_id": self.exclude_session_id,
+            "include_card": self.include_card,
         }))
     }
 }
@@ -23196,6 +23284,126 @@ mod tests {
 
         assert!(body.get("repo_path").is_none());
         assert!(body.get("remote_url").is_none());
+    }
+
+    /// Serve one empty JSON response and return the full raw request received,
+    /// reading until the declared body length has arrived.
+    async fn one_shot_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept connection");
+            let mut received = Vec::new();
+            let mut buf = vec![0u8; 8192];
+            loop {
+                let n = socket.read(&mut buf).await.expect("read request");
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&received).to_string();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let declared = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= declared {
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .expect("write response");
+            String::from_utf8_lossy(&received).to_string()
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn session_resume_list_posts_scope_limit_and_exclusion() {
+        let (url, server) = one_shot_server().await;
+        let ws = Uuid::new_v4();
+        let proj = Uuid::new_v4();
+        let mut config = Config::default();
+        config.api_url = url;
+        config.api_key = Some("test-key".to_string());
+        let client = ContextStreamClient::new(config);
+
+        client
+            .session_resume_list(SessionResumeListParams {
+                workspace_id: Some(ws),
+                project_id: Some(proj),
+                scope: Some("workspace".to_string()),
+                limit: Some(5),
+                exclude_session_id: Some("sess-now".to_string()),
+            })
+            .await
+            .expect("list succeeds");
+
+        let request = server.await.expect("server task");
+        let (head, body) = request.split_once("\r\n\r\n").expect("header/body split");
+        assert!(
+            head.starts_with("POST /api/v1/session/resume/list "),
+            "unexpected request line: {:?}",
+            head.lines().next()
+        );
+        let json: serde_json::Value = serde_json::from_str(body.trim()).expect("JSON body");
+        assert_eq!(json["workspace_id"], ws.to_string());
+        assert_eq!(json["project_id"], proj.to_string());
+        assert_eq!(json["scope"], "workspace");
+        assert_eq!(json["limit"], 5);
+        assert_eq!(json["exclude_session_id"], "sess-now");
+    }
+
+    #[tokio::test]
+    async fn session_resume_get_defaults_scope_ids_and_omits_unset_fields() {
+        let (url, server) = one_shot_server().await;
+        let ws = Uuid::new_v4();
+        let mut config = Config::default();
+        config.api_url = url;
+        config.api_key = Some("test-key".to_string());
+        config.default_workspace_id = Some(ws);
+        let client = ContextStreamClient::new(config);
+
+        client
+            .session_resume_get(SessionResumeGetParams {
+                id: "latest".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("get succeeds");
+
+        let request = server.await.expect("server task");
+        let (head, body) = request.split_once("\r\n\r\n").expect("header/body split");
+        assert!(
+            head.starts_with("POST /api/v1/session/resume/get "),
+            "unexpected request line: {:?}",
+            head.lines().next()
+        );
+        let json: serde_json::Value = serde_json::from_str(body.trim()).expect("JSON body");
+        assert_eq!(json["id"], "latest");
+        assert_eq!(
+            json["workspace_id"],
+            ws.to_string(),
+            "the default workspace is filled in"
+        );
+        for unset in ["scope", "exclude_session_id", "include_card", "project_id"] {
+            assert!(
+                json.get(unset).is_none(),
+                "{unset} must be omitted when unset"
+            );
+        }
     }
 
     #[tokio::test]

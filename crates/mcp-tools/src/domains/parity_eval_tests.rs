@@ -1043,3 +1043,100 @@ async fn suggested_rules_render_typed_lines_with_sources_and_native_guidance() {
         "[SUGGESTED_RULES] stats total=3 accepted=1 rejected=1 pending=1"
     );
 }
+
+#[tokio::test]
+async fn resume_actions_show_the_server_text_and_default_to_latest() {
+    let ws = Uuid::new_v4();
+    let mut routes = scope_routes(ws, None);
+    routes.push(route(
+        "POST",
+        "/api/v1/session/resume/list",
+        200,
+        json!({"success": true, "data": {
+            "scope": "workspace",
+            "count": 1,
+            "text": "Recent sessions (workspace, newest first):\n1. 4f1a9c2e (2h ago, main, 3 commits) Add resume cards\nPick with resume_id=<id> or \"latest\".",
+            "items": []
+        }}),
+    ));
+    routes.push(route(
+        "POST",
+        "/api/v1/session/resume/get",
+        200,
+        json!({"success": true, "data": {
+            "source": "card",
+            "session_id": "4f1a9c2e-aaaa",
+            "text": "Resume: Add resume cards (in_progress, 1h ago, main)\nGoal: ship it"
+        }}),
+    ));
+    let api = MockApi::start(routes).await;
+    let (client, session) = client_and_session(&api.base_url, ws, None);
+    session.initialize(Some(ws), None, None, None).await;
+    let tool = SessionTool::new(client, session, mcp_types::atlas_layer::noop_layer());
+
+    let text = text_of(
+        &tool
+            .execute(json!({"action": "resume_list", "workspace_id": ws, "limit": 5}))
+            .await
+            .expect("resume_list"),
+    );
+    assert!(text.contains("1. 4f1a9c2e (2h ago, main, 3 commits) Add resume cards"));
+    assert!(text.contains("Pick with resume_id"));
+    assert!(api.saw("POST /api/v1/session/resume/list"));
+
+    // No resume_id means the newest session that did real work.
+    let text = text_of(
+        &tool
+            .execute(json!({"action": "resume", "workspace_id": ws}))
+            .await
+            .expect("resume"),
+    );
+    assert!(text.contains("Resume: Add resume cards"));
+    assert!(text.contains("Goal: ship it"));
+    assert!(api.saw("POST /api/v1/session/resume/get"));
+
+    let text = text_of(
+        &tool
+            .execute(json!({"action": "resume", "workspace_id": ws, "resume_id": "4f1a9c2e"}))
+            .await
+            .expect("resume by id"),
+    );
+    assert!(text.contains("Resume: Add resume cards"));
+}
+
+#[tokio::test]
+async fn resume_actions_say_so_when_the_server_sends_no_text() {
+    let ws = Uuid::new_v4();
+    let mut routes = scope_routes(ws, None);
+    routes.push(route(
+        "POST",
+        "/api/v1/session/resume/list",
+        200,
+        json!({"success": true, "data": {"scope": "workspace", "count": 0, "items": []}}),
+    ));
+    routes.push(route(
+        "POST",
+        "/api/v1/session/resume/get",
+        200,
+        json!({"success": true, "data": {"source": "none", "text": "   "}}),
+    ));
+    let api = MockApi::start(routes).await;
+    let (client, session) = client_and_session(&api.base_url, ws, None);
+    session.initialize(Some(ws), None, None, None).await;
+    let tool = SessionTool::new(client, session, mcp_types::atlas_layer::noop_layer());
+
+    let list = text_of(
+        &tool
+            .execute(json!({"action": "resume_list", "workspace_id": ws}))
+            .await
+            .expect("resume_list"),
+    );
+    assert!(list.contains("No recent sessions found."));
+    let card = text_of(
+        &tool
+            .execute(json!({"action": "resume", "workspace_id": ws}))
+            .await
+            .expect("resume"),
+    );
+    assert!(card.contains("Nothing to resume for this scope."));
+}

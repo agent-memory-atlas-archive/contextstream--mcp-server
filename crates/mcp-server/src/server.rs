@@ -311,6 +311,8 @@ fn contextstream_status_metadata(name: &str, title: &str, read_only: bool) -> se
             "smart_search": "Searching ContextStream memory",
             "decision_trace": "Tracing ContextStream decision",
             "restore_context": "Restoring ContextStream context",
+            "resume_list": "Listing recent sessions",
+            "resume": "Loading resume card",
             "list_suggested_rules": "Listing suggested ContextStream rules",
             "suggested_rules_stats": "Loading ContextStream rule stats",
             "user_context": "Loading ContextStream user context",
@@ -2624,7 +2626,7 @@ mod tests {
             // alternatives, scope, confidence, supersedes) plus the
             // `supersede_lesson` action value. Additive only.
             "session",
-            "13a27ebcef31a553b67dc2998e72477332364c1221a0c54e140ec24ab8e95ead",
+            "33dfd983203082155af85e995945cc1ef8ce9b5848ea4f29f409944c2c98f9d2",
         ),
         (
             "session_capture",

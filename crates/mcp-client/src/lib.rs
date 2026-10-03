@@ -156,6 +156,8 @@ pub use client::{
     SessionRecallParams,
     SessionRememberParams,
     SessionRestoreContextParams,
+    SessionResumeGetParams,
+    SessionResumeListParams,
     SessionSmartSearchParams,
     SessionSummaryParams,
     SessionUserContextParams,
