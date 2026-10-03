@@ -309,11 +309,34 @@ pub fn write_stdout_json(output: &HookOutput) -> Result<()> {
 
 /// Whether the hook input came from Cursor.
 ///
-/// Cursor passes `hook_event_name` (snake_case) without Claude's `tool_name`
-/// and without Cline/Roo/Kilo's camelCase `toolName`/`hookName`.
+/// The field name alone is not distinctive: Claude and Codex also send
+/// `hook_event_name`, and prompt/lifecycle events have no `tool_name`.
+/// Cursor's event values use lower camel case; Claude/Codex use PascalCase.
 pub fn input_is_cursor(input: &Value) -> bool {
-    let camel_case = input.get("hookName").is_some() || input.get("toolName").is_some();
-    input.get("hook_event_name").is_some() && input.get("tool_name").is_none() && !camel_case
+    matches!(
+        input.get("hook_event_name").and_then(Value::as_str),
+        Some(
+            "beforeSubmitPrompt"
+                | "preToolUse"
+                | "postToolUse"
+                | "beforeMCPExecution"
+                | "afterMCPExecution"
+                | "beforeShellExecution"
+                | "afterShellExecution"
+                | "beforeReadFile"
+                | "afterFileEdit"
+                | "sessionStart"
+                | "sessionEnd"
+                | "preCompact"
+                | "stop"
+                | "subagentStart"
+                | "subagentStop"
+                | "taskCompleted"
+                | "teammateIdle"
+                | "notification"
+                | "permissionRequest"
+        )
+    )
 }
 
 /// Emit context for the current editor.
@@ -426,10 +449,27 @@ mod tests {
 
     #[test]
     fn input_is_cursor_detects_cursor_and_rejects_others() {
-        // Cursor: snake_case hook_event_name, no tool_name / camelCase markers.
+        // Cursor is identified by the event, even when tool_name is present.
         assert!(input_is_cursor(&serde_json::json!({
             "hook_event_name": "sessionStart"
         })));
+        assert!(input_is_cursor(&serde_json::json!({
+            "hook_event_name": "preToolUse", "tool_name": "Read"
+        })));
+        for event in [
+            "UserPromptSubmit",
+            "SessionStart",
+            "SubagentStart",
+            "Stop",
+            "pre_user_prompt",
+        ] {
+            assert!(
+                !input_is_cursor(&serde_json::json!({
+                    "hook_event_name": event
+                })),
+                "misclassified {event} as Cursor"
+            );
+        }
         // Claude uses tool_name.
         assert!(!input_is_cursor(&serde_json::json!({
             "hook_event_name": "PostToolUse",

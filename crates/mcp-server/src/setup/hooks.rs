@@ -3253,6 +3253,15 @@ mod tests {
     fn test_generate_cursor_hooks_events() {
         let hooks = generate_cursor_hooks("contextstream-mcp");
 
+        for event in hooks.keys() {
+            assert!(
+                crate::hook_handlers::input_is_cursor(&json!({
+                    "hook_event_name": event
+                })),
+                "installed Cursor event must be recognized: {event}"
+            );
+        }
+
         let pre_tool_use = hooks.get("preToolUse").unwrap();
         let before_submit_prompt = hooks.get("beforeSubmitPrompt").unwrap();
 

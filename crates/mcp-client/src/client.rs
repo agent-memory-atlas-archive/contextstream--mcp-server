@@ -2460,7 +2460,10 @@ impl ContextStreamClient {
             ancestor = parent.parent();
         }
 
-        let (global, global_error) = ignore::gitignore::Gitignore::global();
+        // `Gitignore::global()` roots the matcher at the process cwd. Hooks
+        // can drain edits from another checkout, so matching that checkout's
+        // absolute paths against the cwd-rooted matcher would panic.
+        let (global, global_error) = ignore::gitignore::GitignoreBuilder::new(root).build_global();
         if global_error.is_some() {
             return Err(());
         }

@@ -517,12 +517,13 @@ fn detect_editor(input: &Value) -> EditorFormat {
     if input.get("hookName").is_some() || input.get("toolName").is_some() {
         return EditorFormat::Cline;
     }
-    // Cursor uses hook_event_name with different response format
-    if input.get("hook_event_name").is_some() && input.get("tool_name").is_none() {
+    if super::input_is_cursor(input) {
         return EditorFormat::Cursor;
     }
-    // Claude Code uses tool_name (snake_case)
-    if input.get("tool_name").is_some() {
+    // Claude and Codex share the canonical tool event and output schema.
+    if input.get("tool_name").is_some()
+        || input.get("hook_event_name").and_then(Value::as_str) == Some("PreToolUse")
+    {
         return EditorFormat::Claude;
     }
 

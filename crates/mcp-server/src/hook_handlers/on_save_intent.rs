@@ -19,10 +19,7 @@ fn detect_editor(input: &Value) -> EditorFormat {
         return EditorFormat::ClineLike;
     }
 
-    if input.get("hook_event_name").is_some()
-        && input.get("tool_name").is_none()
-        && input.get("toolName").is_none()
-    {
+    if super::input_is_cursor(input) {
         return EditorFormat::Cursor;
     }
 

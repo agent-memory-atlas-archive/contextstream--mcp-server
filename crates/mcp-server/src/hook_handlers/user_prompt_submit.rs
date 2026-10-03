@@ -124,16 +124,14 @@ fn detect_editor(input: &Value) -> EditorFormat {
         return EditorFormat::ClineLike;
     }
 
-    // Cursor uses hook_event_name without tool_name/toolName
-    if input.get("hook_event_name").is_some()
-        && input.get("tool_name").is_none()
-        && input.get("toolName").is_none()
-    {
+    if super::input_is_cursor(input) {
         return EditorFormat::Cursor;
     }
 
-    // Claude Code uses tool_name (snake_case)
-    if input.get("tool_name").is_some() {
+    // Claude and Codex share the canonical prompt event and output schema.
+    if input.get("tool_name").is_some()
+        || input.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit")
+    {
         return EditorFormat::Claude;
     }
 
@@ -629,6 +627,22 @@ mod tests {
             "hook_event_name": "beforeSubmitPrompt"
         });
         assert!(matches!(detect_editor(&input), EditorFormat::Cursor));
+    }
+
+    #[test]
+    fn canonical_prompt_event_keeps_context_for_claude_and_codex() {
+        let input = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "imported-session",
+            "turn_id": "codex-turn",
+            "transcript_path": "/tmp/imported-claude.jsonl",
+            "prompt": "Explain this module."
+        });
+        let editor = detect_editor(&input);
+        assert_eq!(editor, EditorFormat::Claude);
+        let message = build_context_message(editor, "base context".to_string(), &input);
+        assert!(message.contains("base context"));
+        assert!(!message.contains("partial hook support"));
     }
 
     #[test]
