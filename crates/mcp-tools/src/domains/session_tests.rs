@@ -543,7 +543,7 @@ mod context_guidance_tests {
         context_wire_text_priority, estimated_context_tool_wire_tokens, extract_grounding_handle,
         extract_uuid_field, folder_scope_mismatches_project, init_version_notice_line,
         is_context_timeout_error, normalize_search_guidance, project_metadata_matches_folder,
-        project_name_matches_folder, prune_low_relevance_context_lines,
+        project_name_matches_folder, prune_low_relevance_context_lines, shrink_context_wire_value,
         suppress_typed_context_duplicates, ContextWireTokenizerPolicy,
         CONTEXT_DEFAULT_USEFUL_TOKENS, CONTEXT_WIRE_ENVELOPE_TOKENS,
     };
@@ -742,6 +742,86 @@ M:request metrics 403 handling details
             "project_id": "00000000-0000-0000-0000-000000000002"
         });
         (text, structured)
+    }
+
+    #[test]
+    fn protected_structured_fields_are_trimmed_before_they_are_dropped() {
+        // Claude Code hands the model only the structured payload, so grounding
+        // hits, instructions and coordination notices must survive a tight
+        // budget in trimmed form rather than vanish.
+        let text = "[GROUNDING] Prior work: see grounding_hits.\n[INSTRUCTIONS] Search before local discovery.\n[LESSONS_WARNING] Keep the safety invariant active.".to_string();
+        let hits: Vec<_> = (0..6)
+            .map(|i| {
+                json!({
+                    "id": format!("hit-{i}"),
+                    "kind": "session_snapshot",
+                    "content": format!("prior work {i} ").repeat(80),
+                })
+            })
+            .collect();
+        let structured = json!({
+            "context": "core context ".repeat(600),
+            "items": ["bulk item ".repeat(300)],
+            "instructions": vec!["dynamic workflow guidance ".repeat(40); 4],
+            "coordination_inbox": [
+                {"notice_id": "n-1", "body": "coordination notice ".repeat(60)},
+                {"notice_id": "n-2", "body": "second notice ".repeat(60)}
+            ],
+            "grounding_hits": hits,
+            "workspace_id": "00000000-0000-0000-0000-000000000001",
+            "project_id": "00000000-0000-0000-0000-000000000002"
+        });
+        let requested = 700usize;
+
+        let (text, structured) = budget_context_wire_payload(text, structured, requested);
+        let estimated = estimated_context_tool_wire_tokens(&text, &structured);
+        let report = &structured["wire_budget"];
+
+        assert!(estimated <= requested + CONTEXT_WIRE_ENVELOPE_TOKENS);
+        assert!(structured.get("context").is_none(), "bulk copy goes first");
+        let kept_hits = structured["grounding_hits"]
+            .as_array()
+            .expect("grounding hits survive trimmed");
+        assert!(!kept_hits.is_empty() && kept_hits.len() < 6);
+        assert_eq!(kept_hits[0]["id"], "hit-0", "ids are never truncated");
+        assert_eq!(kept_hits[0]["kind"], "session_snapshot");
+        assert!(structured.get("instructions").is_some());
+        assert_eq!(structured["coordination_inbox"][0]["notice_id"], "n-1");
+        assert!(
+            kept_hits[0]["content"].as_str().unwrap().chars().count() < 1040,
+            "hit content is trimmed"
+        );
+        // The human-readable field lists may be shed at the boundary; counts stay.
+        assert!(report["dropped_structured_field_count"].as_u64().unwrap() >= 2);
+        assert!(report["shrunk_structured_field_count"].as_u64().unwrap() >= 1);
+        assert!(text.contains("[LESSONS_WARNING]"));
+    }
+
+    #[test]
+    fn shrinking_keeps_identifying_strings_and_char_boundaries() {
+        let mut value = json!([
+            {"id": "x".repeat(300), "title": "é".repeat(50), "evidence_path": "p/".repeat(200)},
+            {"id": "b"},
+            {"id": "c"}
+        ]);
+
+        assert!(shrink_context_wire_value(
+            &mut value,
+            Some("grounding_hits"),
+            2,
+            10
+        ));
+
+        assert_eq!(value.as_array().unwrap().len(), 2);
+        assert_eq!(value[0]["id"].as_str().unwrap().len(), 300);
+        assert_eq!(value[0]["evidence_path"].as_str().unwrap().len(), 400);
+        assert_eq!(value[0]["title"], format!("{}…", "é".repeat(9)));
+        assert!(!shrink_context_wire_value(
+            &mut value,
+            Some("grounding_hits"),
+            2,
+            10
+        ));
     }
 
     #[test]

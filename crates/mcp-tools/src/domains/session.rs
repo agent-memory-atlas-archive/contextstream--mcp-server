@@ -4716,6 +4716,114 @@ fn context_wire_fits_by_shrinking_text(
     estimated_context_tool_wire_tokens(&kept_text, structured) <= target_tokens
 }
 
+/// Progressively tighter `(max array items, max string chars)` limits applied to
+/// the protected structured fields before any of them is dropped outright.
+const CONTEXT_PROTECTED_SHRINK_LEVELS: &[(usize, usize)] =
+    &[(8, 600), (5, 400), (3, 280), (2, 200), (1, 160)];
+
+/// Keys whose string values identify something a follow-up call needs (ids,
+/// handles, paths, urls) or classify it. They are never truncated.
+fn context_wire_key_is_identifying(key: &str) -> bool {
+    matches!(
+        key,
+        "id" | "handle" | "kind" | "type" | "status" | "path" | "url" | "source" | "name"
+    ) || key.ends_with("_id")
+        || key.ends_with("_handle")
+        || key.ends_with("_path")
+        || key.ends_with("_url")
+        || key.ends_with("_type")
+}
+
+/// Cut `text` to at most `max_chars` characters, marking the cut.
+fn truncate_context_wire_string(text: &str, max_chars: usize) -> Option<String> {
+    if text.chars().count() <= max_chars {
+        return None;
+    }
+    // The marker counts toward the limit, so the result never exceeds it and a
+    // second pass at the same limit is a no-op.
+    let mut cut: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    cut.push('…');
+    Some(cut)
+}
+
+/// Keep at most `max_items` entries of every array and `max_chars` characters of
+/// every non-identifying string, recursively. Returns whether anything changed.
+fn shrink_context_wire_value(
+    value: &mut Value,
+    key: Option<&str>,
+    max_items: usize,
+    max_chars: usize,
+) -> bool {
+    match value {
+        Value::String(text) => {
+            if key.is_some_and(context_wire_key_is_identifying) {
+                return false;
+            }
+            match truncate_context_wire_string(text, max_chars) {
+                Some(cut) => {
+                    *text = cut;
+                    true
+                }
+                None => false,
+            }
+        }
+        Value::Array(items) => {
+            let mut changed = items.len() > max_items;
+            items.truncate(max_items);
+            for item in items.iter_mut() {
+                changed |= shrink_context_wire_value(item, key, max_items, max_chars);
+            }
+            changed
+        }
+        Value::Object(map) => {
+            let mut changed = false;
+            for (child_key, child) in map.iter_mut() {
+                changed |= shrink_context_wire_value(child, Some(child_key), max_items, max_chars);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+/// Make the protected structured fields (skills, lessons, instructions,
+/// coordination notices, grounding evidence) smaller instead of removing them.
+///
+/// Dropping `grounding_hits`, `instructions` or `coordination_inbox` outright
+/// costs the agent its most useful context: clients such as Claude Code hand the
+/// model only the structured payload, while the readable text that duplicates
+/// these fields is what the budget protects. A few trimmed entries keep the
+/// signal and the ids a follow-up call needs. Tightens one level at a time and
+/// stops as soon as the wire fits (directly, or once low-priority text is
+/// compacted). Returns the fields that were shrunk; when even the tightest level
+/// cannot fit, the caller's existing drop order still applies.
+fn shrink_protected_context_wire_fields(
+    text: &str,
+    structured: &mut Value,
+    target_tokens: usize,
+) -> Vec<String> {
+    let mut shrunk: Vec<String> = Vec::new();
+    for &(max_items, max_chars) in CONTEXT_PROTECTED_SHRINK_LEVELS {
+        if estimated_context_tool_wire_tokens(text, structured) <= target_tokens
+            || context_wire_fits_by_shrinking_text(text, structured, target_tokens)
+        {
+            break;
+        }
+        for field in CONTEXT_STRUCTURED_PROTECTED_ORDER {
+            let Some(value) = structured
+                .as_object_mut()
+                .and_then(|object| object.get_mut(*field))
+            else {
+                continue;
+            };
+            if shrink_context_wire_value(value, Some(field), max_items, max_chars) {
+                record_context_wire_field(&mut shrunk, field);
+            }
+        }
+    }
+    shrunk
+}
+
 /// Notice, then shrink the text to the budget. Returns the dropped block count
 /// and whether any block was truncated.
 fn compact_context_wire_text(
@@ -4796,6 +4904,25 @@ fn budget_context_wire_payload(
         truncated_text |= truncated;
     }
 
+    // Still over: trim the protected fields before dropping any of them, so the
+    // agent keeps a few grounding hits, instructions and coordination notices.
+    let mut shrunk_fields: Vec<String> = Vec::new();
+    if estimated_context_tool_wire_tokens(&text, &structured) > target_tokens {
+        shrunk_fields = shrink_protected_context_wire_fields(&text, &mut structured, target_tokens);
+        if estimated_context_tool_wire_tokens(&text, &structured) > target_tokens
+            && context_wire_fits_by_shrinking_text(&text, &structured, target_tokens)
+        {
+            let (dropped, truncated) = compact_context_wire_text(
+                &mut text,
+                &structured,
+                target_tokens,
+                estimated_tokens_before,
+            );
+            dropped_text_blocks += dropped;
+            truncated_text |= truncated;
+        }
+    }
+
     drop_context_wire_fields_while_over(
         CONTEXT_STRUCTURED_PROTECTED_ORDER,
         &text,
@@ -4865,6 +4992,21 @@ fn budget_context_wire_payload(
             "dropped_structured_fields".to_string(),
             serde_json::json!(dropped_fields),
         );
+        // A field that was trimmed and then dropped anyway is reported as dropped.
+        let shrunk_kept: Vec<&String> = shrunk_fields
+            .iter()
+            .filter(|field| !dropped_fields.contains(*field))
+            .collect();
+        if !shrunk_kept.is_empty() {
+            report.insert(
+                "shrunk_structured_field_count".to_string(),
+                serde_json::json!(shrunk_kept.len()),
+            );
+            report.insert(
+                "shrunk_structured_fields".to_string(),
+                serde_json::json!(shrunk_kept),
+            );
+        }
     }
 
     // Report details can themselves cross the boundary. Counts remain exact
@@ -4876,6 +5018,7 @@ fn budget_context_wire_payload(
             .and_then(Value::as_object_mut)
         {
             report.remove("dropped_structured_fields");
+            report.remove("shrunk_structured_fields");
         }
         let reduced = reduce_context_wire_text(&text, Some(&structured), target_tokens);
         text = reduced.0;
