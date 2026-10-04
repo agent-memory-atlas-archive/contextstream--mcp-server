@@ -1823,15 +1823,49 @@ where
 
 /// Run the long-lived watcher. Returns `Ok(())` when disabled, when another
 /// watcher already holds the singleton lock, or on shutdown signal.
+/// launchd sets `XPC_SERVICE_NAME` to the job label for every job it starts.
+const LAUNCHD_SYNC_BRIDGE_LABEL: &str = "io.contextstream.sync-bridge";
+
+/// How often a launchd-managed watcher that lost the singleton race re-checks
+/// the lock instead of exiting.
+const SUPERVISED_LOCK_POLL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn is_launchd_sync_bridge_job(xpc_service_name: Option<&str>) -> bool {
+    xpc_service_name == Some(LAUNCHD_SYNC_BRIDGE_LABEL)
+}
+
 pub async fn run_watch() -> Result<()> {
     if !watch_enabled() {
         eprintln!("ContextStream watch is disabled (CONTEXTSTREAM_WATCH=0).");
         return Ok(());
     }
 
-    let Some(lock) = acquire_singleton_lock() else {
-        eprintln!("Another ContextStream watcher is already running on this machine.");
-        return Ok(());
+    let lock = match acquire_singleton_lock() {
+        Some(lock) => lock,
+        None if is_launchd_sync_bridge_job(std::env::var("XPC_SERVICE_NAME").ok().as_deref()) => {
+            // Another watcher (for example one an update started before the
+            // service manager owned the job) holds the lock. Exiting 0 here
+            // made launchd respawn this process every few seconds for as long
+            // as that watcher lived (KeepAlive=true), thousands of restarts a
+            // day. Wait instead, so the service takes over the moment the lock
+            // is free.
+            eprintln!(
+                "Another ContextStream watcher holds the lock; waiting to take over as the launchd-managed bridge."
+            );
+            loop {
+                tokio::time::sleep(SUPERVISED_LOCK_POLL).await;
+                if !watch_enabled() {
+                    return Ok(());
+                }
+                if let Some(lock) = acquire_singleton_lock() {
+                    break lock;
+                }
+            }
+        }
+        None => {
+            eprintln!("Another ContextStream watcher is already running on this machine.");
+            return Ok(());
+        }
     };
 
     // Credentials: reuse the same resolution as the stdio server / hooks
@@ -3177,6 +3211,21 @@ mod tests {
             Some(v) => std::env::set_var("CONTEXTSTREAM_WATCH", v),
             None => std::env::remove_var("CONTEXTSTREAM_WATCH"),
         }
+    }
+
+    #[test]
+    fn only_the_launchd_sync_bridge_job_waits_for_the_singleton_lock() {
+        // Only the job launchd runs under the managed label waits for the lock
+        // instead of exiting (which would respawn it every few seconds).
+        assert!(is_launchd_sync_bridge_job(Some(
+            "io.contextstream.sync-bridge"
+        )));
+        assert!(!is_launchd_sync_bridge_job(None));
+        assert!(!is_launchd_sync_bridge_job(Some("")));
+        assert!(!is_launchd_sync_bridge_job(Some("io.contextstream.other")));
+        assert!(!is_launchd_sync_bridge_job(Some(
+            "application.io.contextstream.workspace"
+        )));
     }
 
     #[test]

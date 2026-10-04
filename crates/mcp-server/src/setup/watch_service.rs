@@ -337,13 +337,30 @@ fn activate_launch_agent_with(
         return false;
     };
     let service = format!("{domain}/io.contextstream.sync-bridge");
-    let loaded =
-        run("launchctl", &["bootstrap", domain, path]) || run("launchctl", &["print", &service]);
-    if !loaded {
+    if force_restart {
+        // Reload the job instead of `kickstart -k`. A restart keeps the launch
+        // constraints launchd cached for the previous binary, so after an
+        // update replaced the executable the job kept failing with EX_CONFIG
+        // (78) until it was booted out and bootstrapped again.
+        let _ = run("launchctl", &["bootout", &service]);
+        // bootstrap can fail with an I/O error while the bootout is still
+        // settling, so retry briefly before reporting failure.
+        for attempt in 0..LAUNCHD_BOOTSTRAP_ATTEMPTS {
+            if run("launchctl", &["bootstrap", domain, path]) {
+                return true;
+            }
+            if attempt + 1 < LAUNCHD_BOOTSTRAP_ATTEMPTS {
+                #[cfg(not(test))]
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
         return false;
     }
-    !force_restart || run("launchctl", &["kickstart", "-k", &service])
+    run("launchctl", &["bootstrap", domain, path]) || run("launchctl", &["print", &service])
 }
+
+#[cfg(any(target_os = "macos", test))]
+const LAUNCHD_BOOTSTRAP_ATTEMPTS: usize = 3;
 
 #[cfg(windows)]
 fn activate_registration(_spec: &RegistrationSpec, _force_restart: bool) -> bool {
@@ -536,29 +553,54 @@ mod tests {
             });
         assert!(already_loaded);
 
-        let mut restarted = false;
-        let restarted_successfully = activate_launch_agent_with(
+        // A forced restart reloads the job (bootout, then bootstrap) so launchd
+        // re-reads the replaced binary's identity; it never kickstarts.
+        let mut reload_calls = Vec::new();
+        let reloaded = activate_launch_agent_with(&spec, "gui/501", true, |program, arguments| {
+            reload_calls.push(format!("{program} {}", arguments.join(" ")));
+            true
+        });
+        assert!(reloaded);
+        assert_eq!(reload_calls.len(), 2);
+        assert!(reload_calls[0].starts_with("launchctl bootout gui/501/"));
+        assert!(reload_calls[1].starts_with("launchctl bootstrap gui/501 "));
+        assert!(reload_calls.iter().all(|call| !call.contains("kickstart")));
+
+        // bootstrap that fails once while the bootout settles is retried.
+        let mut bootstrap_attempts = 0;
+        let retried =
+            activate_launch_agent_with(
+                &spec,
+                "gui/501",
+                true,
+                |_program, arguments| match arguments.first().copied() {
+                    Some("bootstrap") => {
+                        bootstrap_attempts += 1;
+                        bootstrap_attempts == 2
+                    }
+                    _ => true,
+                },
+            );
+        assert!(retried);
+        assert_eq!(bootstrap_attempts, 2);
+
+        // A job that never comes back is reported as not activated.
+        let mut failed_attempts = 0;
+        let restart_failed = activate_launch_agent_with(
             &spec,
             "gui/501",
             true,
             |_program, arguments| match arguments.first().copied() {
-                Some("bootstrap") => false,
-                Some("print") => true,
-                Some("kickstart") => {
-                    restarted = true;
-                    true
+                Some("bootstrap") => {
+                    failed_attempts += 1;
+                    false
                 }
-                _ => false,
+                Some("print") => true,
+                _ => true,
             },
         );
-        assert!(restarted_successfully);
-        assert!(restarted);
-
-        let restart_failed =
-            activate_launch_agent_with(&spec, "gui/501", true, |_program, arguments| {
-                arguments.first() == Some(&"print")
-            });
         assert!(!restart_failed);
+        assert_eq!(failed_attempts, LAUNCHD_BOOTSTRAP_ATTEMPTS);
     }
 
     #[test]

@@ -359,9 +359,21 @@ fn install_binary_impl(target_dir: &std::path::Path, report_success: bool) -> Re
             .args(["-d", "com.apple.provenance", &staged_str])
             .status();
 
-        // Ad-hoc codesign to mark as trusted
+        // Ad-hoc codesign to mark as trusted. Pass a stable identifier:
+        // without one codesign derives it from the staged file name
+        // (`.contextstream-mcp.contextstream.tmp.<pid>.0`), so every update
+        // produced a different signing identity and launchd, which caches the
+        // launch constraints of the registered sync bridge, then refused to
+        // start the job with EX_CONFIG (78) until it was re-registered.
         let _ = std::process::Command::new("codesign")
-            .args(["--sign", "-", "--force", &staged_str])
+            .args([
+                "--sign",
+                "-",
+                "--force",
+                "--identifier",
+                "io.contextstream.mcp",
+                &staged_str,
+            ])
             .status();
     }
 
